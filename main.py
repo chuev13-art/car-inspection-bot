@@ -26,6 +26,7 @@ dp = Dispatcher()
 # Persistence
 REPORTS_FILE = "reports.json"
 ATTACHMENTS_DIR = "attachments"
+EXPORTS_DIR = "exports"
 reports = {}
 reports_lock = asyncio.Lock()
 
@@ -111,7 +112,7 @@ def new_report():
 
 
 async def show_menu(chat_id):
-    await bot.send_message(chat_id, "Выберите раздел для заполнения:", reply_markup=make_menu())
+    await bot.send_message(chat_id, "Выберите ра��дел для заполнения:", reply_markup=make_menu())
 
 
 @dp.message(Command(commands=["start", "new"]))
@@ -145,7 +146,7 @@ async def cb_menu(query: CallbackQuery):
         # These ask for one short text
         r["awaiting"] = data
         prompts = {
-            "diagnosis": "Коротко опишите результаты диагностики",
+            "diagnosis": "��оротко опишите результаты диагностики",
             "battery": "Коротко опишите состояние батареи",
             "body": "Коротко опишите состояние кузова",
             "interior": "Коротко опишите салон",
@@ -323,6 +324,47 @@ async def handle_text(message: Message):
     await message.answer("Я не ожидал этот текст — открылось меню.", reply_markup=make_menu())
 
 
+async def create_export_files(chat_id: str, html_text: str) -> tuple:
+    """Create HTML and PDF export files and return their paths (html_path, pdf_path or None).
+    PDF generation uses weasyprint if available. Files are placed in exports/<chat_id>/ with timestamp."""
+    os.makedirs(os.path.join(EXPORTS_DIR, chat_id), exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d%H%M%S")
+    safe_ts = ts
+    html_filename = f"report_{safe_ts}.html"
+    pdf_filename = f"report_{safe_ts}.pdf"
+    html_path = os.path.join(EXPORTS_DIR, chat_id, html_filename)
+    pdf_path = os.path.join(EXPORTS_DIR, chat_id, pdf_filename)
+
+    # write HTML
+    try:
+        with open(html_path, "w", encoding="utf-8") as f:
+            f.write(html_text)
+    except Exception:
+        logging.exception("Failed to write HTML export")
+        html_path = None
+
+    # try to create PDF using weasyprint in a thread
+    pdf_created = False
+    try:
+        from weasyprint import HTML as WPHTML
+
+        if html_path:
+            def write_pdf():
+                WPHTML(filename=html_path).write_pdf(pdf_path)
+
+            await asyncio.to_thread(write_pdf)
+            pdf_created = True
+    except ImportError:
+        logging.info("weasyprint not installed; skipping PDF generation")
+    except Exception:
+        logging.exception("Failed to generate PDF")
+
+    if not pdf_created:
+        pdf_path = None
+
+    return html_path, pdf_path
+
+
 async def send_report(chat_id: str):
     if chat_id not in reports:
         await bot.send_message(int(chat_id), "Отчёт не найден. Создайте новый: /start")
@@ -368,6 +410,7 @@ async def send_report(chat_id: str):
         f"<b>Комментарий:</b>\n{esc(r.get('decision_comment'))}\n"
     )
 
+    # send HTML message first
     await bot.send_message(int(chat_id), html_text)
 
     # Send attachments as files/photos
@@ -389,8 +432,36 @@ async def send_report(chat_id: str):
             except Exception:
                 logging.exception("Failed to send attachment")
 
+    # Create export files (HTML and PDF)
+    html_path, pdf_path = await create_export_files(chat_id, html_text)
+
+    # Send HTML file
+    if html_path and os.path.exists(html_path):
+        try:
+            with open(html_path, "rb") as f:
+                await bot.send_document(int(chat_id), f, caption="Отчёт (HTML)")
+        except Exception:
+            logging.exception("Failed to send HTML file")
+
+    # Send PDF if created
+    if pdf_path and os.path.exists(pdf_path):
+        try:
+            with open(pdf_path, "rb") as f:
+                await bot.send_document(int(chat_id), f, caption="Отчёт (PDF)")
+        except Exception:
+            logging.exception("Failed to send PDF file")
+    else:
+        # If PDF not created, notify user how to enable it
+        try:
+            await bot.send_message(int(chat_id), "PDF-экспорт недоступен на сервере (weasyprint не установлен). HTML-файл отправлен.")
+        except Exception:
+            pass
+
 
 async def main():
+    # ensure directories
+    os.makedirs(ATTACHMENTS_DIR, exist_ok=True)
+    os.makedirs(EXPORTS_DIR, exist_ok=True)
     # load persisted reports
     load_reports()
     try:
