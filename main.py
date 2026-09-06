@@ -11,6 +11,7 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
+    FSInputFile,
 )
 from aiogram.filters import Command, CommandStart
 from aiogram.client.default import DefaultBotProperties
@@ -161,7 +162,7 @@ async def cb_menu(query: CallbackQuery):
     elif data == "attachments":
         r["awaiting"] = "attachments"
         await query.message.answer(
-            "Отправьте фото/файлы вложений или краткое текстовое описание. Можно отправить несколько сообщений[...]")
+            "Отправьте фото/файлы вложений или краткое текстовое описание. Можно отправить неско��ько сообщений[...]")
     elif data == "decision":
         await query.message.answer("Выберите решение:", reply_markup=make_decision_kb())
     elif data == "export":
@@ -254,7 +255,7 @@ async def handle_attachments_and_files(message: Message):
         if text:
             r["attachments"].append({"type": "note", "text": text})
             await save_reports()
-            await message.answer("Описание добавлено к вложениям.")
+            await message.answer("Описание добавлено к влож��ниям.")
         return
 
 
@@ -413,9 +414,6 @@ async def send_report(chat_id: str):
         f"<b>Комментарий:</b>\n{esc(r.get('decision_comment'))}\n"
     )
 
-    # send HTML message first
-    await bot.send_message(int(chat_id), html_text)
-
     # Send attachments as files/photos
     if r.get("attachments"):
         for a in r["attachments"]:
@@ -438,27 +436,23 @@ async def send_report(chat_id: str):
     # Create export files (HTML and PDF)
     html_path, pdf_path = await create_export_files(chat_id, html_text)
 
-    # Send HTML file
-    if html_path and os.path.exists(html_path):
-        try:
-            with open(html_path, "rb") as f:
-                await bot.send_document(int(chat_id), f, caption="Отчёт (HTML)")
-        except Exception:
-            logging.exception("Failed to send HTML file")
-
     # Send PDF if created
     if pdf_path and os.path.exists(pdf_path):
         try:
-            with open(pdf_path, "rb") as f:
-                await bot.send_document(int(chat_id), f, caption="Отчёт (PDF)")
+            pdf_file = FSInputFile(pdf_path, filename=os.path.basename(pdf_path))
+            await bot.send_document(int(chat_id), document=pdf_file, caption="Отчёт (PDF)")
         except Exception:
             logging.exception("Failed to send PDF file")
+            try:
+                await bot.send_message(int(chat_id), "Не удалось отправить PDF-файл.")
+            except Exception:
+                logging.exception("Failed to send error message to user")
     else:
-        # If PDF not created, notify user how to enable it
+        # If PDF not created, notify user
         try:
-            await bot.send_message(int(chat_id), "PDF-экспорт недоступен на сервере (weasyprint не установлен). HTML-файл отправлен.")
+            await bot.send_message(int(chat_id), "PDF-экспорт недоступен на сервере (weasyprint не установлен) или файл не создан.")
         except Exception:
-            pass
+            logging.exception("Failed to notify user about missing PDF")
 
 
 async def main():
