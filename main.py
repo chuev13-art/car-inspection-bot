@@ -401,20 +401,20 @@ async def send_report(chat_id: str):
         f"<b>Комментарий:</b>\n{esc(r.get('decision_comment'))}\n"
     )
 
-    # Send attachments as files/photos
+    # Send attachments as files/photos using FSInputFile to satisfy pydantic validation
     if r.get("attachments"):
         for a in r["attachments"]:
             try:
                 if a.get("type") == "photo":
                     path = a.get("path")
                     if os.path.exists(path):
-                        with open(path, "rb") as f:
-                            await bot.send_photo(int(chat_id), f)
+                        photo = FSInputFile(path)
+                        await bot.send_photo(int(chat_id), photo)
                 elif a.get("type") == "document":
                     path = a.get("path")
                     if os.path.exists(path):
-                        with open(path, "rb") as f:
-                            await bot.send_document(int(chat_id), f)
+                        doc = FSInputFile(path)
+                        await bot.send_document(int(chat_id), document=doc)
                 elif a.get("type") == "note":
                     await bot.send_message(int(chat_id), f"Вложение: {a.get('text')}")
             except Exception:
