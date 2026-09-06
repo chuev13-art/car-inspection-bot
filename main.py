@@ -5,14 +5,14 @@ import html
 import json
 from datetime import datetime
 
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
     Message,
     CallbackQuery,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
 )
-from aiogram.filters import Command, Text
+from aiogram.filters import Command, CommandStart
 
 logging.basicConfig(level=logging.INFO)
 
@@ -112,7 +112,7 @@ def new_report():
 
 
 async def show_menu(chat_id):
-    await bot.send_message(chat_id, "Выберите ра��дел для заполнения:", reply_markup=make_menu())
+    await bot.send_message(chat_id, "Выберите раздел для заполнения:", reply_markup=make_menu())
 
 
 @dp.message(Command(commands=["start", "new"]))
@@ -126,7 +126,7 @@ async def cmd_start(message: Message):
     )
 
 
-@dp.callback_query(Text(startswith="menu:"))
+@dp.callback_query(F.data.startswith("menu:"))
 async def cb_menu(query: CallbackQuery):
     chat_id = str(query.message.chat.id)
     data = query.data.split(":", 1)[1]
@@ -146,7 +146,7 @@ async def cb_menu(query: CallbackQuery):
         # These ask for one short text
         r["awaiting"] = data
         prompts = {
-            "diagnosis": "��оротко опишите результаты диагностики",
+            "diagnosis": "Коротко опишите результаты диагностики",
             "battery": "Коротко опишите состояние батареи",
             "body": "Коротко опишите состояние кузова",
             "interior": "Коротко опишите салон",
@@ -158,7 +158,7 @@ async def cb_menu(query: CallbackQuery):
     elif data == "attachments":
         r["awaiting"] = "attachments"
         await query.message.answer(
-            "Отправьте фото/файлы вложений или краткое текстовое описание. Можно отправить несколько сообщений — каждое добавит один вложенный элемент. После завершения нажмите любую кнопку в меню.")
+            "Отправьте фото/файлы вложений или краткое текстовое описание. Можно отправить несколько сообщений[...]")
     elif data == "decision":
         await query.message.answer("Выберите решение:", reply_markup=make_decision_kb())
     elif data == "export":
@@ -172,7 +172,7 @@ async def cb_menu(query: CallbackQuery):
     await query.answer()
 
 
-@dp.callback_query(Text(startswith="decision:"))
+@dp.callback_query(F.data.startswith("decision:"))
 async def cb_decision_choice(query: CallbackQuery):
     chat_id = str(query.message.chat.id)
     choice = query.data.split(":", 1)[1]
@@ -315,7 +315,7 @@ async def handle_text(message: Message):
 
     # attachments handled by another handler; if we reach here while awaiting attachments, ignore
     if awaiting == "attachments":
-        await message.answer("Отправьте фото/файлы или краткое текстовое описание. Можно отправить несколько сообщений — каждое добавит элемент вложений.")
+        await message.answer("Отправьте фото/файлы или краткое текстовое описание. Можно отправить несколько сообщений[...]")
         return
 
     # Fallback
