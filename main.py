@@ -76,20 +76,19 @@ MENU_KEYS = [
 
 
 def make_menu():
-    kb = InlineKeyboardMarkup(row_width=2)
+    # Build rows of 2 buttons for InlineKeyboardMarkup using inline_keyboard parameter
     buttons = [InlineKeyboardButton(text=t, callback_data=cd) for t, cd in MENU_KEYS]
-    kb.add(*buttons)
-    return kb
+    rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def make_decision_kb():
-    kb = InlineKeyboardMarkup(row_width=1)
-    kb.add(
-        InlineKeyboardButton("✅ Рекомендую", callback_data="decision:recommend"),
-        InlineKeyboardButton("🤝 С торгом", callback_data="decision:trade"),
-        InlineKeyboardButton("⛔ Не рекомендую", callback_data="decision:not_recommend"),
-    )
-    return kb
+    # Single-column keyboard
+    buttons = [InlineKeyboardButton("✅ Рекомендую", callback_data="decision:recommend"),
+               InlineKeyboardButton("🤝 С торгом", callback_data="decision:trade"),
+               InlineKeyboardButton("⛔ Не рекомендую", callback_data="decision:not_recommend")]
+    rows = [[b] for b in buttons]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def new_report():
