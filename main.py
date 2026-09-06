@@ -13,7 +13,7 @@ from aiogram.types import (
     InlineKeyboardButton,
     FSInputFile,
 )
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command
 from aiogram.client.default import DefaultBotProperties
 
 logging.basicConfig(level=logging.INFO)
@@ -85,9 +85,11 @@ def make_menu():
 
 def make_decision_kb():
     # Single-column keyboard
-    buttons = [InlineKeyboardButton("✅ Рекомендую", callback_data="decision:recommend"),
-               InlineKeyboardButton("🤝 С торгом", callback_data="decision:trade"),
-               InlineKeyboardButton("⛔ Не рекомендую", callback_data="decision:not_recommend")]
+    buttons = [
+        InlineKeyboardButton("✅ Рекомендую", callback_data="decision:recommend"),
+        InlineKeyboardButton("🤝 С торгом", callback_data="decision:trade"),
+        InlineKeyboardButton("⛔ Не рекомендую", callback_data="decision:not_recommend"),
+    ]
     rows = [[b] for b in buttons]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -162,7 +164,7 @@ async def cb_menu(query: CallbackQuery):
     elif data == "attachments":
         r["awaiting"] = "attachments"
         await query.message.answer(
-            "Отправьте фото/файлы вложений или краткое текстовое описание. Можно отправить неско��ько сообщений[...]")
+            "Отправьте фото/файлы вложений или краткое текстовое описание. Можно отправить несколько сообщений — отправьте все вложения, затем нажмите \"Новый отчёт\" или другое меню.")
     elif data == "decision":
         await query.message.answer("Выберите решение:", reply_markup=make_decision_kb())
     elif data == "export":
@@ -197,72 +199,10 @@ async def cb_decision_choice(query: CallbackQuery):
 
 
 @dp.message()
-async def handle_attachments_and_files(message: Message):
-    # This handler checks if the user is currently sending attachments
+async def handle_message(message: Message):
     chat_id = str(message.chat.id)
-    if chat_id not in reports:
-        return  # let other handlers prompt to create a report
 
-    r = reports[chat_id]
-    if r.get("awaiting") != "attachments":
-        return  # not in attachments mode
-
-    # Ensure attachments dir exists
-    os.makedirs(os.path.join(ATTACHMENTS_DIR, chat_id), exist_ok=True)
-
-    # Photos
-    if message.photo:
-        # take largest photo
-        photo = message.photo[-1]
-        file_id = photo.file_id
-        file = await bot.get_file(file_id)
-        ts = datetime.now().strftime("%Y%m%d%H%M%S")
-        filename = f"{ts}_{file_id}.jpg"
-        dest_path = os.path.join(ATTACHMENTS_DIR, chat_id, filename)
-        try:
-            await bot.download(file.file_path, destination=dest_path)
-            r["attachments"].append({"type": "photo", "path": dest_path, "file_name": filename})
-            await message.answer("Фото добавлено.")
-            await save_reports()
-        except Exception as e:
-            logging.exception("Failed to download photo: %s", e)
-            await message.answer("Не удалось сохранить фото.")
-        return
-
-    # Documents
-    if message.document:
-        doc = message.document
-        file_id = doc.file_id
-        file = await bot.get_file(file_id)
-        ts = datetime.now().strftime("%Y%m%d%H%M%S")
-        _, ext = os.path.splitext(doc.file_name or "")
-        ext = ext or ""
-        filename = f"{ts}_{file_id}{ext}"
-        dest_path = os.path.join(ATTACHMENTS_DIR, chat_id, filename)
-        try:
-            await bot.download(file.file_path, destination=dest_path)
-            r["attachments"].append({"type": "document", "path": dest_path, "file_name": filename})
-            await message.answer("Файл добавлен.")
-            await save_reports()
-        except Exception as e:
-            logging.exception("Failed to download document: %s", e)
-            await message.answer("Не удалось сохранить файл.")
-        return
-
-    # Text description
-    if message.text:
-        text = message.text.strip()
-        if text:
-            r["attachments"].append({"type": "note", "text": text})
-            await save_reports()
-            await message.answer("Описание добавлено к влож��ниям.")
-        return
-
-
-@dp.message()
-async def handle_text(message: Message):
-    chat_id = str(message.chat.id)
-    text = (message.text or "").strip()
+    # If report doesn't exist, prompt to create
     if chat_id not in reports:
         await message.answer("Сначала создайте отчёт командой /start")
         return
@@ -270,9 +210,63 @@ async def handle_text(message: Message):
     r = reports[chat_id]
     awaiting = r.get("awaiting")
 
+    # Attachments mode: handle photos, documents, text notes
+    if awaiting == "attachments":
+        os.makedirs(os.path.join(ATTACHMENTS_DIR, chat_id), exist_ok=True)
+
+        # Photos
+        if message.photo:
+            photo = message.photo[-1]
+            file_id = photo.file_id
+            file = await bot.get_file(file_id)
+            ts = datetime.now().strftime("%Y%m%d%H%M%S")
+            filename = f"{ts}_{file_id}.jpg"
+            dest_path = os.path.join(ATTACHMENTS_DIR, chat_id, filename)
+            try:
+                await bot.download(file.file_path, destination=dest_path)
+                r["attachments"].append({"type": "photo", "path": dest_path, "file_name": filename})
+                await message.answer("Фото добавлено.")
+                await save_reports()
+            except Exception:
+                logging.exception("Failed to download photo")
+                await message.answer("Не удалось сохранить фото.")
+            return
+
+        # Documents
+        if message.document:
+            doc = message.document
+            file_id = doc.file_id
+            file = await bot.get_file(file_id)
+            ts = datetime.now().strftime("%Y%m%d%H%M%S")
+            _, ext = os.path.splitext(doc.file_name or "")
+            ext = ext or ""
+            filename = f"{ts}_{file_id}{ext}"
+            dest_path = os.path.join(ATTACHMENTS_DIR, chat_id, filename)
+            try:
+                await bot.download(file.file_path, destination=dest_path)
+                r["attachments"].append({"type": "document", "path": dest_path, "file_name": filename})
+                await message.answer("Файл добавлен.")
+                await save_reports()
+            except Exception:
+                logging.exception("Failed to download document")
+                await message.answer("Не удалось сохранить файл.")
+            return
+
+        # Text note for attachments
+        if message.text:
+            text = message.text.strip()
+            if text:
+                r["attachments"].append({"type": "note", "text": text})
+                await save_reports()
+                await message.answer("Описание добавлено к вложениям.")
+            return
+
+    # Not in attachments mode — handle normal text flows
     if awaiting is None:
         await message.answer("Используйте меню для выбора раздела.", reply_markup=make_menu())
         return
+
+    text = (message.text or "").strip()
 
     if awaiting == "car":
         step = r.get("car_step", 0)
@@ -295,7 +289,6 @@ async def handle_text(message: Message):
             await save_reports()
             await message.answer("Данные авто записаны.", reply_markup=make_menu())
         else:
-            # safety fallback
             r["car_step"] = 0
             r["awaiting"] = None
             await message.answer("Непредвиденное состояние. Открылось меню.", reply_markup=make_menu())
@@ -309,17 +302,11 @@ async def handle_text(message: Message):
         await message.answer("Решение и комментарий записаны.", reply_markup=make_menu())
         return
 
-    # Single-field sections
     if awaiting in ("diagnosis", "battery", "body", "interior", "wheels", "testdrive", "urgent"):
         r[awaiting] = text
         r["awaiting"] = None
         await save_reports()
         await message.answer(f"{awaiting.capitalize()} записано.", reply_markup=make_menu())
-        return
-
-    # attachments handled by another handler; if we reach here while awaiting attachments, ignore
-    if awaiting == "attachments":
-        await message.answer("Отправьте фото/файлы или краткое текстовое описание. Можно отправить несколько сообщений[...]")
         return
 
     # Fallback
