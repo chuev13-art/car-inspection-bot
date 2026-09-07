@@ -5,7 +5,7 @@ import json
 import logging
 import os
 import re
-import shutil
+import base64
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -56,7 +56,7 @@ SECTION_PROMPTS = {
     "body": "Опишите кузов: окрасы, толщины ЛКП, ремонты, коррозия, геометрия, стёкла.",
     "interior": "Опишите салон: износ, работоспособность опций, запахи, следы воды/разбора.",
     "wheels": "Опишите шины и колёса: сезон, остаток протектора, год, повреждения, диски.",
-    "testdrive": "Опишите тест-драйв: запуск, ДВС/КПП, подвеска, рулевое, тормоза, вибрации.",
+    "testdrive": "Опишите тес��-драйв: запуск, ДВС/КПП, подвеска, рулевое, тормоза, вибрации.",
     "urgent": "Укажите критичные риски и срочные рекомендации. Если их нет — напишите «Нет».",
 }
 
@@ -150,27 +150,35 @@ def touch(report: dict[str, Any]) -> None:
     report["updated_at"] = datetime.now().isoformat(timespec="seconds")
 
 
-def main_menu() -> InlineKeyboardMarkup:
+# Dynamic main menu with checkmarks
+def make_main_menu(report: dict[str, Any]) -> InlineKeyboardMarkup:
+    def L(key: Optional[str], label: str) -> str:
+        if key == "car":
+            filled = any(str(v).strip() for v in report.get("car", {}).values())
+        else:
+            filled = is_filled(report.get(key))
+        return f"{label} {'✅' if filled else '◻️'}"
+
     rows = [
         [
-            InlineKeyboardButton(text="🚘 Авто", callback_data="menu:car"),
-            InlineKeyboardButton(text="🧾 Диагностика", callback_data="menu:diagnosis"),
+            InlineKeyboardButton(text=L("car", "🚘 Авто"), callback_data="menu:car"),
+            InlineKeyboardButton(text=L("diagnosis", "🧾 Диагностика"), callback_data="menu:diagnosis"),
         ],
         [
-            InlineKeyboardButton(text="🔋 Батарея", callback_data="menu:battery"),
-            InlineKeyboardButton(text="🎨 Кузов", callback_data="menu:body"),
+            InlineKeyboardButton(text=L("battery", "🔋 Батарея"), callback_data="menu:battery"),
+            InlineKeyboardButton(text=L("body", "🎨 Кузов"), callback_data="menu:body"),
         ],
         [
-            InlineKeyboardButton(text="🪑 Салон", callback_data="menu:interior"),
-            InlineKeyboardButton(text="🛞 Колёса", callback_data="menu:wheels"),
+            InlineKeyboardButton(text=L("interior", "🪑 Салон"), callback_data="menu:interior"),
+            InlineKeyboardButton(text=L("wheels", "🛞 Колёса"), callback_data="menu:wheels"),
         ],
         [
-            InlineKeyboardButton(text="🛣 Тест-драйв", callback_data="menu:testdrive"),
-            InlineKeyboardButton(text="⚠️ Риски", callback_data="menu:urgent"),
+            InlineKeyboardButton(text=L("testdrive", "🛣 Тест-драйв"), callback_data="menu:testdrive"),
+            InlineKeyboardButton(text=L("urgent", "⚠️ Риски"), callback_data="menu:urgent"),
         ],
         [
-            InlineKeyboardButton(text="📎 Фото / файлы", callback_data="menu:attachments"),
-            InlineKeyboardButton(text="✅ Решение", callback_data="menu:decision"),
+            InlineKeyboardButton(text=L(None, "📎 Фото / файлы"), callback_data="menu:attachments"),
+            InlineKeyboardButton(text=L("decision", "✅ Решение"), callback_data="menu:decision"),
         ],
         [
             InlineKeyboardButton(text="📋 Сводка", callback_data="menu:summary"),
@@ -338,7 +346,8 @@ def validate_car(car: dict[str, str]) -> list[str]:
 
 
 async def answer_menu(message: Message, text: str) -> None:
-    await message.answer(text, reply_markup=main_menu())
+    report = ensure_report(str(message.chat.id))
+    await message.answer(text, reply_markup=make_main_menu(report))
 
 
 @dp.message(Command(commands=["start", "new"]))
@@ -386,14 +395,15 @@ async def cmd_help(message: Message) -> None:
     )
 
 
-def cb_menu(query: CallbackQuery) -> None:
+@dp.callback_query(F.data.startswith("menu:"))
+async def cb_menu(query: CallbackQuery) -> None:
     chat_id = str(query.message.chat.id)
     report = ensure_report(chat_id)
     action = query.data.split(":", 1)[1]
 
     if action == "home":
         report["awaiting"] = None
-        await query.message.answer("Главное меню.", reply_markup=main_menu())
+        await query.message.answer("Главное меню.", reply_markup=make_main_menu(report))
 
     elif action == "car":
         report["awaiting"] = None
@@ -428,4 +438,416 @@ def cb_menu(query: CallbackQuery) -> None:
 
     elif action == "clone":
         new_report = new_report_template()
-        new_report["car"] = copy.deepcopy(report["car")
+        new_report["car"] = copy.deepcopy(report["car"]) 
+        reports[chat_id] = new_report
+        report = new_report
+        await query.message.answer("🔁 Новый отчёт создан; данные автомобиля перенесены.", reply_markup=make_main_menu(report))
+
+    elif action == "new":
+        reports[chat_id] = new_report_template()
+        report = reports[chat_id]
+        await query.message.answer("🆕 Создан чистый отчёт.", reply_markup=make_main_menu(report))
+
+    touch(report)
+    await save_reports()
+    await query.answer()
+
+
+@dp.callback_query(F.data.startswith("edit:"))
+async def cb_edit(query: CallbackQuery) -> None:
+    chat_id = str(query.message.chat.id)
+    report = ensure_report(chat_id)
+    section = query.data.split(":", 1)[1]
+
+    if section == "car":
+        report["awaiting"] = "car"
+        await query.message.answer(
+            "<b>Введите данные одной строкой через ;</b>\n"
+            "Марка; Модель; Год; Пробег; VIN; Цена; Продавец/ссылка; Заказчик\n\n"
+            "Пример:\n"
+            "Toyota; Camry; 2019; 78 000 км; XW7BF4FK90S000000; 2 350 000 ₽; Avito / Иван; Алексей"
+        )
+    elif section in TEXT_SECTIONS:
+        report["awaiting"] = section
+        await query.message.answer(SECTION_PROMPTS[section])
+    else:
+        await query.answer("Неизвестный раздел", show_alert=True)
+        return
+
+    touch(report)
+    await save_reports()
+    await query.answer()
+
+
+@dp.callback_query(F.data.startswith("clear:"))
+async def cb_clear(query: CallbackQuery) -> None:
+    chat_id = str(query.message.chat.id)
+    report = ensure_report(chat_id)
+    section = query.data.split(":", 1)[1]
+
+    if section == "car":
+        report["car"] = new_report_template()["car"]
+        text = "Данные автомобиля очищены."
+    elif section in TEXT_SECTIONS:
+        report[section] = ""
+        text = f"Раздел «{TEXT_SECTIONS[section]}» очищен."
+    else:
+        await query.answer("Неизвестный раздел", show_alert=True)
+        return
+
+    report["awaiting"] = None
+    touch(report)
+    await save_reports()
+    await query.message.answer(text, reply_markup=make_main_menu(report))
+    await query.answer()
+
+
+@dp.callback_query(F.data.startswith("decision:"))
+async def cb_decision(query: CallbackQuery) -> None:
+    chat_id = str(query.message.chat.id)
+    report = ensure_report(chat_id)
+    choice = query.data.split(":", 1)[1]
+
+    if choice == "skip_comment":
+        report["decision_comment"] = ""
+        report["awaiting"] = None
+        touch(report)
+        await save_reports()
+        await query.message.answer("Решение сохранено без комментария.", reply_markup=make_main_menu(report))
+        await query.answer()
+        return
+
+    choices = {
+        "recommend": "✅ Рекомендую",
+        "trade": "🤝 Рекомендую с торгом",
+        "not_recommend": "⛔ Не рекомендую",
+    }
+    if choice not in choices:
+        await query.answer("Неизвестное решение", show_alert=True)
+        return
+
+    report["decision"] = choices[choice]
+    report["awaiting"] = "decision_comment"
+    touch(report)
+    await save_reports()
+    await query.message.answer(
+        "Введите короткий итоговый комментарий или нажмите «Пропустить».",
+        reply_markup=decision_comment_kb(),
+    )
+    await query.answer()
+
+
+@dp.callback_query(F.data.startswith("tag:"))
+async def cb_tag(query: CallbackQuery) -> None:
+    chat_id = str(query.message.chat.id)
+    report = ensure_report(chat_id)
+    tag = query.data.split(":", 1)[1]
+    if tag not in ATTACHMENT_TAGS:
+        await query.answer("Неизвестный раздел", show_alert=True)
+        return
+
+    report["attachment_tag"] = tag
+    report["awaiting"] = "attachments"
+    touch(report)
+    await save_reports()
+    await query.message.answer(
+        f"Раздел: <b>{ATTACHMENT_TAGS[tag]}</b>\n"
+        "Отправляйте фото, документы или текстовые заметки. Можно отправить несколько сообщений подряд.",
+        reply_markup=attachment_mode_kb(),
+    )
+    await query.answer()
+
+
+@dp.callback_query(F.data == "attach:done")
+async def cb_attachment_done(query: CallbackQuery) -> None:
+    report = ensure_report(str(query.message.chat.id))
+    report["awaiting"] = None
+    touch(report)
+    await save_reports()
+    await query.message.answer("Вложения сохранены.", reply_markup=make_main_menu(report))
+    await query.answer()
+
+
+@dp.callback_query(F.data == "export:confirm")
+async def cb_export_confirm(query: CallbackQuery) -> None:
+    report = ensure_report(str(query.message.chat.id))
+    report["awaiting"] = None
+    await save_reports()
+    await query.message.answer("Формирую PDF…")
+    await send_report(str(query.message.chat.id))
+    await query.answer()
+
+
+async def save_attachment(message: Message, report: dict[str, Any], chat_id: str) -> bool:
+    target_dir = ATTACHMENTS_DIR / chat_id
+    target_dir.mkdir(parents=True, exist_ok=True)
+    tag = report.get("attachment_tag", "general")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+
+    try:
+        if message.photo:
+            photo = message.photo[-1]
+            filename = f"{timestamp}_{photo.file_unique_id}.jpg"
+            path = target_dir / filename
+            await bot.download(photo, destination=path)
+            report["attachments"].append({
+                "type": "photo",
+                "path": str(path),
+                "name": filename,
+                "tag": tag,
+            })
+            await message.answer(f"Фото добавлено: {ATTACHMENT_TAGS.get(tag, tag)}")
+            return True
+
+        if message.document:
+            document = message.document
+            extension = Path(document.file_name or "").suffix[:12]
+            filename = f"{timestamp}_{document.file_unique_id}{extension}"
+            path = target_dir / filename
+            await bot.download(document, destination=path)
+            report["attachments"].append({
+                "type": "document",
+                "path": str(path),
+                "name": document.file_name or filename,
+                "tag": tag,
+            })
+            await message.answer(f"Файл добавлен: {ATTACHMENT_TAGS.get(tag, tag)}")
+            return True
+    except Exception:
+        logger.exception("Failed to download attachment")
+        await message.answer("Не удалось сохранить вложение.")
+        return True
+
+    return False
+
+
+@dp.message()
+async def handle_message(message: Message) -> None:
+    chat_id = str(message.chat.id)
+    report = ensure_report(chat_id)
+    awaiting = report.get("awaiting")
+
+    if awaiting == "attachments":
+        if await save_attachment(message, report, chat_id):
+            touch(report)
+            await save_reports()
+            return
+        text = (message.text or "").strip()
+        if text:
+            report["attachments"].append({
+                "type": "note",
+                "text": text,
+                "tag": report.get("attachment_tag", "general"),
+            })
+            touch(report)
+            await save_reports()
+            await message.answer("Заметка добавлена.", reply_markup=attachment_mode_kb())
+        else:
+            await message.answer("Отправьте фото, документ или текстовую заметку.", reply_markup=attachment_mode_kb())
+        return
+
+    if awaiting == "car":
+        text = (message.text or "").strip()
+        car = parse_car_input(text)
+        if not car:
+            await message.answer(
+                "Нужны ровно 8 значений через <b>;</b>:\n"
+                "Марка; Модель; Год; Пробег; VIN; Цена; Продавец/ссылка; Заказчик\n\n"
+                "Поля, которые пока неизвестны, оставьте пустыми, но разделитель сохраните."
+            )
+            return
+        report["car"].update(car)
+        report["awaiting"] = None
+        touch(report)
+        await save_reports()
+        warnings = validate_car(car)
+        response = "✅ Данные автомобиля сохранены."
+        if warnings:
+            response += "\n\n⚠️ " + "\n⚠️ ".join(warnings)
+        await answer_menu(message, response)
+        return
+
+    if awaiting == "decision_comment":
+        report["decision_comment"] = (message.text or "").strip()
+        report["awaiting"] = None
+        touch(report)
+        await save_reports()
+        await answer_menu(message, "✅ Итоговый комментарий сохранён.")
+        return
+
+    if awaiting in TEXT_SECTIONS:
+        text = (message.text or "").strip()
+        if not text:
+            await message.answer("Нужен текст. Отправьте описание или вернитесь в меню.", reply_markup=back_to_menu_kb())
+            return
+        report[awaiting] = text
+        report["awaiting"] = None
+        touch(report)
+        await save_reports()
+        await answer_menu(message, f"✅ Раздел «{TEXT_SECTIONS[awaiting]}» сохранён.")
+        return
+
+    await message.answer("Выберите раздел отчёта.", reply_markup=make_main_menu(report))
+
+
+def escape_value(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "—"
+    return html.escape(text).replace("\n", "<br>")
+
+
+def render_report_html(report: dict[str, Any]) -> str:
+    car = report["car"]
+    created_at = report.get("created_at", "")
+    generated_at = datetime.now().strftime("%d.%m.%Y %H:%M")
+
+    # logo as data URI
+    logo_path = Path("assets") / "logo.png"
+    logo_data_uri = ""
+    if logo_path.exists():
+        try:
+            data = logo_path.read_bytes()
+            mime = "image/png"
+            logo_data_uri = f"data:{mime};base64," + base64.b64encode(data).decode("ascii")
+        except Exception:
+            logger.exception("Failed to read logo image")
+            logo_data_uri = ""
+
+    section_html = ""
+    for key, label in TEXT_SECTIONS.items():
+        checked = "✅" if is_filled(report.get(key)) else "◻️"
+        section_html += f"""
+        <section>
+          <h2>{label} {checked}</h2>
+          <div class=\"content\">{escape_value(report.get(key))}</div>
+        </section>
+        """
+
+    attachments_html = ""
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for attachment in report.get("attachments", []):
+        groups.setdefault(attachment.get("tag", "general"), []).append(attachment)
+
+    for tag, items in groups.items():
+        attachments_html += f"<h3>{html.escape(ATTACHMENT_TAGS.get(tag, tag))}</h3>"
+        for item in items:
+            item_type = item.get("type")
+            if item_type == "note":
+                attachments_html += f"<p>• {escape_value(item.get('text'))}</p>"
+            elif item_type == "photo" and item.get("path") and Path(item["path"]).exists():
+                uri = Path(item["path"]).resolve().as_uri()
+                attachments_html += f"<figure><img src=\"{uri}\"><figcaption>{html.escape(item.get('name', 'Фото'))}</figcaption></figure>"
+            else:
+                attachments_html += f"<p>• 📎 {html.escape(item.get('name', 'Файл'))}</p>"
+
+    if not attachments_html:
+        attachments_html = "<p>—</p>"
+
+    return f"""
+    <!doctype html>
+    <html lang=\"ru\">
+    <head>
+      <meta charset=\"utf-8\">
+      <style>
+        @page {{ size: A4; margin: 16mm 14mm; }}
+        body {{ font-family: DejaVu Sans, Arial, sans-serif; color: #202124; font-size: 10.5pt; line-height: 1.35; }}
+        h1 {{ margin: 0 0 4px; color: #113b64; font-size: 20pt; }}
+        h2 {{ margin: 16px 0 6px; padding: 6px 8px; color: #113b64; background: #eaf3fb; font-size: 12pt; }}
+        h3 {{ margin: 10px 0 5px; font-size: 10.5pt; }}
+        .meta {{ color: #5f6368; margin-bottom: 14px; }}
+        table {{ width: 100%; border-collapse: collapse; margin: 8px 0 12px; }}
+        td {{ padding: 6px 7px; border: 1px solid #d9e0e6; vertical-align: top; }}
+        td.label {{ width: 24%; background: #f7f9fb; font-weight: bold; }}
+        .content {{ white-space: normal; }}
+        .decision {{ padding: 10px; border: 2px solid #113b64; background: #f5faff; }}
+        figure {{ margin: 8px 0 12px; page-break-inside: avoid; }}
+        img {{ max-width: 100%; max-height: 170mm; object-fit: contain; }}
+        figcaption {{ color: #5f6368; font-size: 8pt; }}
+      </style>
+    </head>
+    <body>
+      <div style=\"display:flex;align-items:center;gap:12px;margin-bottom:8px;\">
+        {f'<img src="{logo_data_uri}" style="height:48px;">' if logo_data_uri else ''}
+        <div>
+          <h1>Отчёт по осмотру автомобиля</h1>
+          <div class=\"meta\">Сформирован: {generated_at}{' · Создан: ' + html.escape(created_at) if created_at else ''}</div>
+        </div>
+      </div>
+
+      <h2>🚘 Данные автомобиля</h2>
+      <table>
+        <tr><td class=\"label\">Марка / модель</td><td>{escape_value(car.get('make'))} {escape_value(car.get('model'))}</td></tr>
+        <tr><td class=\"label\">Год / пробег</td><td>{escape_value(car.get('year'))} / {escape_value(car.get('mileage'))}</td></tr>
+        <tr><td class=\"label\">VIN</td><td>{escape_value(car.get('vin'))}</td></tr>
+        <tr><td class=\"label\">Цена</td><td>{escape_value(car.get('price'))}</td></tr>
+        <tr><td class=\"label\">Продавец / ссылка</td><td>{escape_value(car.get('seller'))}</td></tr>
+        <tr><td class=\"label\">Заказчик</td><td>{escape_value(car.get('customer'))}</td></tr>
+      </table>
+
+      {section_html}
+
+      <h2>📎 Фото, файлы и заметки</h2>
+      {attachments_html}
+
+      <h2>✅ Итоговое решение</h2>
+      <div class=\"decision\"><b>{escape_value(report.get('decision'))}</b><br><br>{escape_value(report.get('decision_comment'))}</div>
+    </body>
+    </html>
+    """
+
+
+async def generate_pdf_bytes(html_text: str) -> bytes:
+    try:
+        from weasyprint import HTML
+    except ImportError as exc:
+        raise RuntimeError("Для экспорта PDF установите WeasyPrint: pip install weasyprint") from exc
+    return await asyncio.to_thread(lambda: HTML(string=html_text).write_pdf())
+
+
+async def send_report(chat_id: str) -> None:
+    report = reports.get(chat_id)
+    if not report:
+        await bot.send_message(int(chat_id), "Отчёт не найден. Нажмите /new.")
+        return
+
+    try:
+        pdf_bytes = await generate_pdf_bytes(render_report_html(report))
+    except RuntimeError as exc:
+        await bot.send_message(int(chat_id), html.escape(str(exc)))
+        return
+    except Exception:
+        logger.exception("PDF rendering failed")
+        await bot.send_message(int(chat_id), "Не удалось сформировать PDF. Подробности — в логах сервера.")
+        return
+
+    export_dir = EXPORTS_DIR / chat_id
+    export_dir.mkdir(parents=True, exist_ok=True)
+    car = report["car"]
+    car_slug = "_".join(filter(None, [car.get("make", ""), car.get("model", "")]))
+    car_slug = re.sub(r"[^\w.-]+", "_", car_slug, flags=re.UNICODE).strip("_") or "auto"
+    filename = f"inspection_{car_slug}_{datetime.now():%Y%m%d_%H%M}.pdf"
+    pdf_path = export_dir / filename
+
+    try:
+        await asyncio.to_thread(pdf_path.write_bytes, pdf_bytes)
+        await bot.send_document(
+            int(chat_id),
+            FSInputFile(pdf_path, filename=filename),
+            caption="📄 Отчёт по осмотру автомобиля",
+        )
+    except Exception:
+        logger.exception("Failed to send generated PDF")
+        await bot.send_message(int(chat_id), "PDF сформирован, но отправить его не удалось.")
+
+
+async def main() -> None:
+    load_reports()
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await bot.session.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
