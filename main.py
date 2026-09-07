@@ -1,9 +1,9 @@
 import os
 import asyncio
 import logging
-import html
 import json
 from datetime import datetime
+from typing import Optional
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
@@ -17,24 +17,27 @@ from aiogram.filters import Command
 from aiogram.client.default import DefaultBotProperties
 
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("Environment variable BOT_TOKEN is required")
 
-bot = Bot(
-    token=BOT_TOKEN,
-    default=DefaultBotProperties(parse_mode="HTML"),
-)
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 
-# Persistence
+# Directories
 REPORTS_FILE = "reports.json"
 ATTACHMENTS_DIR = "attachments"
 EXPORTS_DIR = "exports"
-reports = {}
+os.makedirs(ATTACHMENTS_DIR, exist_ok=True)
+os.makedirs(EXPORTS_DIR, exist_ok=True)
+
+# In-memory reports storage
+reports: dict = {}
 reports_lock = asyncio.Lock()
 
+# --- Utilities ---
 
 def load_reports():
     global reports
@@ -42,8 +45,8 @@ def load_reports():
         try:
             with open(REPORTS_FILE, "r", encoding="utf-8") as f:
                 reports = json.load(f)
-        except Exception as e:
-            logging.warning("Failed to load reports.json: %s", e)
+        except Exception:
+            logger.exception("Failed to load reports.json; starting empty")
             reports = {}
     else:
         reports = {}
@@ -56,35 +59,34 @@ async def save_reports():
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(reports, f, ensure_ascii=False, indent=2)
             os.replace(tmp, REPORTS_FILE)
-        except Exception as e:
-            logging.exception("Failed to save reports: %s", e)
+        except Exception:
+            logger.exception("Failed to save reports.json")
 
 
-MENU_KEYS = [
-    ("🚘 Данные авто", "menu:car"),
-    ("💻 Диагностика", "menu:diagnosis"),
-    ("🔋 Батарея", "menu:battery"),
-    ("🎨 Кузов", "menu:body"),
-    ("🪑 Салон", "menu:interior"),
-    ("🛞 Колёса", "menu:wheels"),
-    ("🛣 Тест-драйв", "menu:testdrive"),
-    ("⚠️ Срочно", "menu:urgent"),
-    ("📌 Вложения", "menu:attachments"),
-    ("✅ Решение", "menu:decision"),
-    ("📄 Сформировать отчёт", "menu:export"),
-    ("🗑 Новый отчёт", "menu:new"),
-]
-
-
-def make_menu():
-    # Build rows of 2 buttons for InlineKeyboardMarkup using inline_keyboard parameter
-    buttons = [InlineKeyboardButton(text=t, callback_data=cd) for t, cd in MENU_KEYS]
-    rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
+def make_main_menu() -> InlineKeyboardMarkup:
+    # More compact and readable menu
+    keys = [
+        ("🚘 Данные авто", "menu:car"),
+        ("🧾 Диагностика", "menu:diagnosis"),
+        ("🔋 Батарея", "menu:battery"),
+        ("🎨 Кузов", "menu:body"),
+        ("🪑 Салон", "menu:interior"),
+        ("🛞 Колёса", "menu:wheels"),
+        ("🛣 Тест-драйв", "menu:testdrive"),
+        ("⚠️ Срочно", "menu:urgent"),
+        ("📌 Вложения", "menu:attachments"),
+        ("✅ Решение", "menu:decision"),
+        ("📄 Экспорт PDF", "menu:export"),
+        ("🗑 Новый отчёт", "menu:new"),
+        ("❓ Помощь", "menu:help"),
+    ]
+    buttons = [InlineKeyboardButton(text=t, callback_data=cd) for t, cd in keys]
+    # arrange 3 buttons per row
+    rows = [buttons[i : i + 3] for i in range(0, len(buttons), 3)]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def make_decision_kb():
-    # Single-column keyboard
     buttons = [
         InlineKeyboardButton("✅ Рекомендую", callback_data="decision:recommend"),
         InlineKeyboardButton("🤝 С торгом", callback_data="decision:trade"),
@@ -94,10 +96,12 @@ def make_decision_kb():
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def new_report():
+def new_report_template() -> dict:
     return {
         "car": {
-            "make_model_year": "",
+            "make": "",
+            "model": "",
+            "year": "",
             "mileage": "",
             "vin": "",
             "customer": "",
@@ -109,7 +113,7 @@ def new_report():
         "wheels": "",
         "testdrive": "",
         "urgent": "",
-        "attachments": [],  # list of dicts: {type: 'photo'/'document'/'note', path/name or text}
+        "attachments": [],
         "decision": "",
         "decision_comment": "",
         "awaiting": None,
@@ -117,62 +121,77 @@ def new_report():
     }
 
 
-async def show_menu(chat_id):
-    await bot.send_message(chat_id, "Выберите раздел для заполнения:", reply_markup=make_menu())
+def ensure_report(chat_id: str) -> dict:
+    if chat_id not in reports:
+        reports[chat_id] = new_report_template()
+    return reports[chat_id]
 
+
+# --- Handlers ---
 
 @dp.message(Command(commands=["start", "new"]))
 async def cmd_start(message: Message):
     chat_id = str(message.chat.id)
-    reports[chat_id] = new_report()
+    reports[chat_id] = new_report_template()
     await save_reports()
     await message.answer(
-        "Создан новый отчёт.\n\nКоманда /start или /new создаёт новый отчёт и открывает меню.",
-        reply_markup=make_menu(),
+        "Создан новый отчёт. Используйте меню для заполнения полей.", reply_markup=make_main_menu()
     )
+
+
+@dp.message(Command(commands=["help"]))
+async def cmd_help(message: Message):
+    await message.answer(
+        "Команды:\n/start или /new — новый отчёт\n/Export или кнопка 'Экспорт PDF' — сформировать PDF и отправить\n"
+        "Заполняйте разделы через меню. Вкладка 'Вложения' принимает фото и файлы.")
 
 
 @dp.callback_query(F.data.startswith("menu:"))
 async def cb_menu(query: CallbackQuery):
     chat_id = str(query.message.chat.id)
-    data = query.data.split(":", 1)[1]
+    action = query.data.split(":", 1)[1]
+    r = ensure_report(chat_id)
 
-    # Ensure report exists
-    if chat_id not in reports:
-        reports[chat_id] = new_report()
-        await save_reports()
-
-    r = reports[chat_id]
-
-    if data == "car":
+    if action == "car":
         r["car_step"] = 1
         r["awaiting"] = "car"
-        await query.message.answer("1/4 — Введите: Марка, модель, год")
-    elif data in ("diagnosis", "battery", "body", "interior", "wheels", "testdrive", "urgent"):
-        # These ask for one short text
-        r["awaiting"] = data
+        await query.message.answer("Данные авто — шаг 1/6. Введите марку (например, Toyota)")
+    elif action in (
+        "diagnosis",
+        "battery",
+        "body",
+        "interior",
+        "wheels",
+        "testdrive",
+        "urgent",
+    ):
+        r["awaiting"] = action
         prompts = {
-            "diagnosis": "Коротко опишите результаты диагностики",
-            "battery": "Коротко опишите состояние батареи",
-            "body": "Коротко опишите состояние кузова",
-            "interior": "Коротко опишите салон",
-            "wheels": "Коротко опишите колёса/шины",
-            "testdrive": "Коротко опишите результаты тест-драйва",
-            "urgent": "Коротко укажите срочные рекомендации",
+            "diagnosis": "Опишите результаты диагностики (кратко)",
+            "battery": "Опишите состояние батареи",
+            "body": "Опишите состояние кузова",
+            "interior": "Опишите салон",
+            "wheels": "Опишите состояние колёс/шин",
+            "testdrive": "Опишите результаты тест-драйва",
+            "urgent": "Укажите срочные рекомендации",
         }
-        await query.message.answer(prompts[data])
-    elif data == "attachments":
+        await query.message.answer(prompts[action])
+    elif action == "attachments":
         r["awaiting"] = "attachments"
         await query.message.answer(
-            "Отправьте фото/файлы вложений или краткое текстовое описание. Можно отправить несколько сообщений — отправьте все вложения, затем нажмите \"Новый отчёт\" или другое меню.")
-    elif data == "decision":
+            "Отправьте фото или файлы. После загрузки всех вложений нажмите 'Экспорт PDF' в меню."
+        )
+    elif action == "decision":
         await query.message.answer("Выберите решение:", reply_markup=make_decision_kb())
-    elif data == "export":
+    elif action == "export":
+        await query.message.answer("Формирую PDF, подождите...")
         await send_report(chat_id)
-    elif data == "new":
-        reports[chat_id] = new_report()
+    elif action == "new":
+        reports[chat_id] = new_report_template()
         await save_reports()
-        await query.message.answer("Создан новый отчёт.", reply_markup=make_menu())
+        await query.message.answer("Создан новый отчёт.", reply_markup=make_main_menu())
+    elif action == "help":
+        await query.message.answer("Используйте кнопки меню для заполнения отчёта. /help для справки.")
 
     await save_reports()
     await query.answer()
@@ -182,10 +201,7 @@ async def cb_menu(query: CallbackQuery):
 async def cb_decision_choice(query: CallbackQuery):
     chat_id = str(query.message.chat.id)
     choice = query.data.split(":", 1)[1]
-    if chat_id not in reports:
-        reports[chat_id] = new_report()
-
-    r = reports[chat_id]
+    r = ensure_report(chat_id)
     mapping = {
         "recommend": "✅ Рекомендую",
         "trade": "🤝 С торгом",
@@ -194,61 +210,51 @@ async def cb_decision_choice(query: CallbackQuery):
     r["decision"] = mapping.get(choice, choice)
     r["awaiting"] = "decision_comment"
     await save_reports()
-    await query.message.answer("Введите краткий итоговый комментарий (после выбора кнопки решения):")
+    await query.message.answer("Введите итоговый комментарий к решению:")
     await query.answer()
 
 
 @dp.message()
 async def handle_message(message: Message):
     chat_id = str(message.chat.id)
-
-    # If report doesn't exist, prompt to create
-    if chat_id not in reports:
-        await message.answer("Сначала создайте отчёт командой /start")
-        return
-
-    r = reports[chat_id]
+    r = ensure_report(chat_id)
     awaiting = r.get("awaiting")
 
-    # Attachments mode: handle photos, documents, text notes
+    # Attachments handling
     if awaiting == "attachments":
         os.makedirs(os.path.join(ATTACHMENTS_DIR, chat_id), exist_ok=True)
-
-        # Photos
+        # Photo
         if message.photo:
             photo = message.photo[-1]
-            file_id = photo.file_id
-            file = await bot.get_file(file_id)
+            file = await bot.get_file(photo.file_id)
             ts = datetime.now().strftime("%Y%m%d%H%M%S")
-            filename = f"{ts}_{file_id}.jpg"
-            dest_path = os.path.join(ATTACHMENTS_DIR, chat_id, filename)
+            filename = f"{ts}_{photo.file_id}.jpg"
+            dest = os.path.join(ATTACHMENTS_DIR, chat_id, filename)
             try:
-                await bot.download(file.file_path, destination=dest_path)
-                r["attachments"].append({"type": "photo", "path": dest_path, "file_name": filename})
+                await bot.download(file.file_path, destination=dest)
+                r["attachments"].append({"type": "photo", "path": dest, "name": filename})
                 await message.answer("Фото добавлено.")
                 await save_reports()
             except Exception:
-                logging.exception("Failed to download photo")
+                logger.exception("Failed to download photo")
                 await message.answer("Не удалось сохранить фото.")
             return
 
-        # Documents
+        # Document
         if message.document:
             doc = message.document
-            file_id = doc.file_id
-            file = await bot.get_file(file_id)
+            file = await bot.get_file(doc.file_id)
             ts = datetime.now().strftime("%Y%m%d%H%M%S")
             _, ext = os.path.splitext(doc.file_name or "")
-            ext = ext or ""
-            filename = f"{ts}_{file_id}{ext}"
-            dest_path = os.path.join(ATTACHMENTS_DIR, chat_id, filename)
+            filename = f"{ts}_{doc.file_id}{ext}"
+            dest = os.path.join(ATTACHMENTS_DIR, chat_id, filename)
             try:
-                await bot.download(file.file_path, destination=dest_path)
-                r["attachments"].append({"type": "document", "path": dest_path, "file_name": filename})
+                await bot.download(file.file_path, destination=dest)
+                r["attachments"].append({"type": "document", "path": dest, "name": filename})
                 await message.answer("Файл добавлен.")
                 await save_reports()
             except Exception:
-                logging.exception("Failed to download document")
+                logger.exception("Failed to download document")
                 await message.answer("Не удалось сохранить файл.")
             return
 
@@ -261,37 +267,47 @@ async def handle_message(message: Message):
                 await message.answer("Описание добавлено к вложениям.")
             return
 
-    # Not in attachments mode — handle normal text flows
+    # Non-attachments flows
     if awaiting is None:
-        await message.answer("Используйте меню для выбора раздела.", reply_markup=make_menu())
+        await message.answer("Выберите раздел в меню.", reply_markup=make_main_menu())
         return
 
     text = (message.text or "").strip()
 
+    # Car multi-step: make, model, year, mileage, vin, customer
     if awaiting == "car":
         step = r.get("car_step", 0)
         if step == 1:
-            r["car"]["make_model_year"] = text
+            r["car"]["make"] = text
             r["car_step"] = 2
-            await message.answer("2/4 — Введите: Пробег")
+            await message.answer("Шаг 2/6 — Введите модель")
         elif step == 2:
-            r["car"]["mileage"] = text
+            r["car"]["model"] = text
             r["car_step"] = 3
-            await message.answer("3/4 — Введите: VIN")
+            await message.answer("Шаг 3/6 — Введите год выпуска")
         elif step == 3:
-            r["car"]["vin"] = text
+            r["car"]["year"] = text
             r["car_step"] = 4
-            await message.answer("4/4 — Введите: Имя заказчика")
+            await message.answer("Шаг 4/6 — Введите пробег")
         elif step == 4:
+            r["car"]["mileage"] = text
+            r["car_step"] = 5
+            await message.answer("Шаг 5/6 — Введите VIN")
+        elif step == 5:
+            r["car"]["vin"] = text
+            r["car_step"] = 6
+            await message.answer("Шаг 6/6 — Введите имя заказчика")
+        elif step == 6:
             r["car"]["customer"] = text
             r["car_step"] = 0
             r["awaiting"] = None
             await save_reports()
-            await message.answer("Данные авто записаны.", reply_markup=make_menu())
+            await message.answer("Данные авто сохранены.", reply_markup=make_main_menu())
         else:
-            r["car_step"] = 0
-            r["awaiting"] = None
-            await message.answer("Непредвиденное состояние. Открылось меню.", reply_markup=make_menu())
+            # start
+            r["car_step"] = 1
+            r["awaiting"] = "car"
+            await message.answer("Шаг 1/6 — Введите марку автомобиля")
         await save_reports()
         return
 
@@ -299,61 +315,129 @@ async def handle_message(message: Message):
         r["decision_comment"] = text
         r["awaiting"] = None
         await save_reports()
-        await message.answer("Решение и комментарий записаны.", reply_markup=make_menu())
+        await message.answer("Комментарий к решению сохранён.", reply_markup=make_main_menu())
         return
 
-    if awaiting in ("diagnosis", "battery", "body", "interior", "wheels", "testdrive", "urgent"):
+    if awaiting in (
+        "diagnosis",
+        "battery",
+        "body",
+        "interior",
+        "wheels",
+        "testdrive",
+        "urgent",
+    ):
         r[awaiting] = text
         r["awaiting"] = None
         await save_reports()
-        await message.answer(f"{awaiting.capitalize()} записано.", reply_markup=make_menu())
+        await message.answer(f"{awaiting.capitalize()} сохранено.", reply_markup=make_main_menu())
         return
 
-    # Fallback
+    # fallback
     r["awaiting"] = None
     await save_reports()
-    await message.answer("Я не ожидал этот текст — открылось меню.", reply_markup=make_menu())
+    await message.answer("Непонятный ввод — откройте меню.", reply_markup=make_main_menu())
 
 
-async def create_export_files(chat_id: str, html_text: str) -> tuple:
-    """Create HTML and PDF export files and return their paths (html_path, pdf_path or None).
-    PDF generation uses weasyprint if available. Files are placed in exports/<chat_id>/ with timestamp."""
-    os.makedirs(os.path.join(EXPORTS_DIR, chat_id), exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d%H%M%S")
-    safe_ts = ts
-    html_filename = f"report_{safe_ts}.html"
-    pdf_filename = f"report_{safe_ts}.pdf"
-    html_path = os.path.join(EXPORTS_DIR, chat_id, html_filename)
-    pdf_path = os.path.join(EXPORTS_DIR, chat_id, pdf_filename)
+# --- PDF generation and sending ---
 
-    # write HTML
-    try:
-        with open(html_path, "w", encoding="utf-8") as f:
-            f.write(html_text)
-    except Exception:
-        logging.exception("Failed to write HTML export")
-        html_path = None
+def render_report_html(r: dict) -> str:
+    car = r.get("car", {})
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    # try to create PDF using weasyprint in a thread
-    pdf_created = False
+    def esc(s: Optional[str]) -> str:
+        return s or "—"
+
+    # simple HTML template used only to generate PDF, not saved as file
+    html = f"""
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <style>
+        body {{ font-family: DejaVu Sans, Arial, sans-serif; font-size: 12px; }}
+        h1 {{ text-align: center; }}
+        .section {{ margin-bottom: 12px; }}
+        .label {{ font-weight: bold; }}
+      </style>
+    </head>
+    <body>
+      <h1>Отчёт по осмотру автомобиля</h1>
+      <div class="section"><span class="label">Дата:</span> {now}</div>
+
+      <div class="section"><span class="label">Марка:</span> {esc(car.get('make'))} &nbsp; <span class="label">Модель:</span> {esc(car.get('model'))} &nbsp; <span class="label">Год:</span> {esc(car.get('year'))}</div>
+      <div class="section"><span class="label">Пробег:</span> {esc(car.get('mileage'))} &nbsp; <span class="label">VIN:</span> {esc(car.get('vin'))}</div>
+      <div class="section"><span class="label">Заказчик:</span> {esc(car.get('customer'))}</div>
+
+      <div class="section"><span class="label">Диагностика:</span><div>{esc(r.get('diagnosis'))}</div></div>
+      <div class="section"><span class="label">Батарея:</span><div>{esc(r.get('battery'))}</div></div>
+      <div class="section"><span class="label">Кузов:</span><div>{esc(r.get('body'))}</div></div>
+      <div class="section"><span class="label">Салон:</span><div>{esc(r.get('interior'))}</div></div>
+      <div class="section"><span class="label">Колёса:</span><div>{esc(r.get('wheels'))}</div></div>
+      <div class="section"><span class="label">Тест-драйв:</span><div>{esc(r.get('testdrive'))}</div></div>
+      <div class="section"><span class="label">Срочные рекомендации:</span><div>{esc(r.get('urgent'))}</div></div>
+
+      <div class="section"><span class="label">Вложения:</span>
+    """
+    # attachments list
+    if r.get("attachments"):
+        for a in r["attachments"]:
+            if a.get("type") == "note":
+                html += f"<div>- {a.get('text')}</div>"
+            else:
+                html += f"<div>- {a.get('name')}</div>"
+    else:
+        html += "<div>—</div>"
+
+    html += f"""
+      </div>
+      <div class="section"><span class="label">Итог:</span><div>{esc(r.get('decision'))}</div></div>
+      <div class="section"><span class="label">Комментарий:</span><div>{esc(r.get('decision_comment'))}</div></div>
+    </body>
+    </html>
+    """
+    return html
+
+
+async def generate_pdf_bytes(html_text: str) -> bytes:
     try:
         from weasyprint import HTML as WPHTML
+    except Exception as e:
+        logger.exception("weasyprint not available")
+        raise RuntimeError("weasyprint not installed; install with 'pip install weasyprint' to enable PDF export") from e
 
-        if html_path:
-            def write_pdf():
-                WPHTML(filename=html_path).write_pdf(pdf_path)
-
-            await asyncio.to_thread(write_pdf)
-            pdf_created = True
-    except ImportError:
-        logging.info("weasyprint not installed; skipping PDF generation")
+    # generate PDF in memory
+    try:
+        pdf_bytes = await asyncio.to_thread(lambda: WPHTML(string=html_text).write_pdf())
+        return pdf_bytes
     except Exception:
-        logging.exception("Failed to generate PDF")
+        logger.exception("Failed to render PDF")
+        raise
 
-    if not pdf_created:
-        pdf_path = None
 
-    return html_path, pdf_path
+async def send_pdf_to_chat(chat_id: str, pdf_bytes: bytes, filename: Optional[str] = None):
+    # save to file then send as FSInputFile to avoid pydantic issues
+    os.makedirs(os.path.join(EXPORTS_DIR, chat_id), exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d%H%M%S")
+    filename = filename or f"report_{ts}.pdf"
+    path = os.path.join(EXPORTS_DIR, chat_id, filename)
+
+    try:
+        with open(path, "wb") as f:
+            f.write(pdf_bytes)
+    except Exception:
+        logger.exception("Failed to write PDF to disk")
+        await bot.send_message(int(chat_id), "Не удалось сохранить PDF на сервере.")
+        return
+
+    try:
+        pdf_file = FSInputFile(path, filename=filename)
+        await bot.send_document(int(chat_id), document=pdf_file, caption="Отчёт (PDF)")
+    except Exception:
+        logger.exception("Failed to send PDF file")
+        try:
+            await bot.send_message(int(chat_id), "Не удалось отправить PDF-файл.")
+        except Exception:
+            logger.exception("Failed to notify user about failed PDF send")
 
 
 async def send_report(chat_id: str):
@@ -362,91 +446,39 @@ async def send_report(chat_id: str):
         return
 
     r = reports[chat_id]
-    car = r["car"]
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    def esc(s):
-        return html.escape(s) if s else "—"
+    html_text = render_report_html(r)
 
-    html_text = (
-        f"<b>ОТЧЁТ ПО ОСМОТРУ АВТОМОБИЛЯ</b>\n\n"
-        f"<b>Автомобиль:</b> {esc(car.get('make_model_year'))}\n"
-        f"<b>Пробег:</b> {esc(car.get('mileage'))}\n"
-        f"<b>VIN:</b> {esc(car.get('vin'))}\n"
-        f"<b>Заказчик:</b> {esc(car.get('customer'))}\n"
-        f"<b>Дата осмотра:</b> {esc(now)}\n\n"
-        f"<b>Диагностика:</b>\n{esc(r.get('diagnosis'))}\n\n"
-        f"<b>Батарея:</b>\n{esc(r.get('battery'))}\n\n"
-        f"<b>Кузов:</b>\n{esc(r.get('body'))}\n\n"
-        f"<b>Салон:</b>\n{esc(r.get('interior'))}\n\n"
-        f"<b>Колёса:</b>\n{esc(r.get('wheels'))}\n\n"
-        f"<b>Тест-драйв:</b>\n{esc(r.get('testdrive'))}\n\n"
-        f"<b>Срочные рекомендации:</b>\n{esc(r.get('urgent'))}\n\n"
-        f"<b>Вложения:</b>\n"
-    )
+    # generate PDF bytes
+    try:
+        pdf_bytes = await generate_pdf_bytes(html_text)
+    except RuntimeError as e:
+        await bot.send_message(int(chat_id), str(e))
+        return
+    except Exception:
+        await bot.send_message(int(chat_id), "Ошибка при формировании PDF. Подробности в логах." )
+        return
 
-    # Append attachments summary
-    if r.get("attachments"):
-        for a in r["attachments"]:
-            if a.get("type") == "note":
-                html_text += esc(a.get("text")) + "\n"
-            else:
-                html_text += esc(a.get("file_name")) + "\n"
-    else:
-        html_text += "—\n"
-
-    html_text += (
-        "\n"
-        f"<b>Итог:</b>\n{esc(r.get('decision'))}\n\n"
-        f"<b>Комментарий:</b>\n{esc(r.get('decision_comment'))}\n"
-    )
-
-    # Send attachments as files/photos using FSInputFile to satisfy pydantic validation
+    # send attachments first (photos/documents)
     if r.get("attachments"):
         for a in r["attachments"]:
             try:
-                if a.get("type") == "photo":
-                    path = a.get("path")
-                    if os.path.exists(path):
-                        photo = FSInputFile(path)
-                        await bot.send_photo(int(chat_id), photo)
-                elif a.get("type") == "document":
-                    path = a.get("path")
-                    if os.path.exists(path):
-                        doc = FSInputFile(path)
-                        await bot.send_document(int(chat_id), document=doc)
-                elif a.get("type") == "note":
-                    await bot.send_message(int(chat_id), f"Вложение: {a.get('text')}")
+                if a.get("type") == "photo" and os.path.exists(a.get("path")):
+                    photo = FSInputFile(a.get("path"), filename=a.get("name"))
+                    await bot.send_photo(int(chat_id), photo)
+                elif a.get("type") == "document" and os.path.exists(a.get("path")):
+                    doc = FSInputFile(a.get("path"), filename=a.get("name"))
+                    await bot.send_document(int(chat_id), document=doc)
             except Exception:
-                logging.exception("Failed to send attachment")
+                logger.exception("Failed to send attachment %s", a)
 
-    # Create export files (HTML and PDF)
-    html_path, pdf_path = await create_export_files(chat_id, html_text)
+    # send generated PDF
+    await send_pdf_to_chat(chat_id, pdf_bytes)
 
-    # Send PDF if created
-    if pdf_path and os.path.exists(pdf_path):
-        try:
-            pdf_file = FSInputFile(pdf_path, filename=os.path.basename(pdf_path))
-            await bot.send_document(int(chat_id), document=pdf_file, caption="Отчёт (PDF)")
-        except Exception:
-            logging.exception("Failed to send PDF file")
-            try:
-                await bot.send_message(int(chat_id), "Не удалось отправить PDF-файл.")
-            except Exception:
-                logging.exception("Failed to send error message to user")
-    else:
-        # If PDF not created, notify user
-        try:
-            await bot.send_message(int(chat_id), "PDF-экспорт недоступен на сервере (weasyprint не установлен) или файл не создан.")
-        except Exception:
-            logging.exception("Failed to notify user about missing PDF")
 
+# --- Entrypoint ---
 
 async def main():
-    # ensure directories
-    os.makedirs(ATTACHMENTS_DIR, exist_ok=True)
-    os.makedirs(EXPORTS_DIR, exist_ok=True)
-    # load persisted reports
     load_reports()
     try:
         await dp.start_polling(bot)
