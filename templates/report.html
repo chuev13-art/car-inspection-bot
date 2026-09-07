@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{{ report_title or 'Car Inspection Report' }}</title>
+  <style>
+    body { font-family: DejaVu Sans, Arial, sans-serif; color:#222; margin: 0; padding: 0; }
+    .page { padding: 24px 36px; }
+    header { display:flex; align-items:center; gap:16px; margin-bottom:18px; }
+    header img { height:48px; width:auto; }
+    h1 { font-size:18px; margin:0; }
+    .meta { color:#666; font-size:12px; }
+    .section { margin-top:14px; border-top:1px solid #eee; padding-top:10px; }
+    .item { display:flex; align-items:center; gap:10px; margin:6px 0; }
+    .check { width:22px; text-align:center; font-size:14px; }
+    .label { font-size:13px; }
+    footer { position:fixed; bottom:12px; left:36px; right:36px; font-size:11px; color:#888; }
+    @media print { header img { height:40px; } }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header>
+      {% if logo_data_uri %}
+      <img src="{{ logo_data_uri }}" alt="logo">
+      {% endif %}
+      <div>
+        <h1>{{ report_title or 'Отчёт по осмотру автомобиля' }}</h1>
+        <div class="meta">Дата: {{ date or '-' }} — Клиент: {{ client or '-' }}</div>
+      </div>
+    </header>
+
+    {% for section in sections %}
+    <div class="section">
+      <strong>{{ section.title }}</strong>
+      <div>
+        {% for item in section.items %}
+        <div class="item">
+          <div class="check">{% if item.checked %}✅{% else %}◻️{% endif %}</div>
+          <div class="label">{{ item.label }}{% if item.note %} — {{ item.note }}{% endif %}</div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    {% endfor %}
+
+    {% if comments %}
+    <div class="section">
+      <strong>Комментарии</strong>
+      <div>{{ comments }}</div>
+    </div>
+    {% endif %}
+
+  </div>
+  <footer>Сгенерировано с помощью car-inspection-bot</footer>
+</body>
+</html>
